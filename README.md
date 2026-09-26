@@ -39,7 +39,9 @@
 最近锚点偏移），对序号区间内的实际事件分别计算两版校准温度，按
 **低于下限 / 区间内（含边界）/ 高于上限**判定结论；只统计两版结论不同的事件，
 把**序号连续且变化方向相同**的事件合成影响段（缺号断段、不补点），逐段输出
-起止序号、事件数、原/新结论与段内最大校准温差。插值与阈值判断全程使用精确数值，
+起止序号、事件数、原/新结论与段内最大校准温差——精确值以约分后“分子/分母”
+字符串给出，浮点字段在可表示为有限浮点数时返回数字、超出范围时返回 `null`
+（不输出无穷大）。插值与阈值判断全程使用精确数值，
 边界不会误判；缺版本或箱号返回 `404`，空区间返回空段。全程只读，保留现有
 校准及全部分析结果。
 
@@ -1177,7 +1179,12 @@ curl -i 'http://localhost:8000/boxes/BOX-CAL/calibration-trajectory?version=1&se
   且**变化方向相同**（`from_status -> to_status` 一致）的事件**合成一个影响段**；
   一旦遇到**缺号**或结论未变的事件即**断段，不为缺号造点**，变化方向不同也分开成段。
 - 每段给出起止序号、段内事件数、原结论 `from_status`、新结论 `to_status` 与
-  **最大校准温差** `max_calibration_delta = max(|新版本校准温度 − 原版本校准温度|)`。
+  **最大校准温差** `max(|新版本校准温度 − 原版本校准温度|)`，以两个字段表示：
+  - `max_calibration_delta_exact`：精确值，约分后的**“分子/分母”**十进制整数
+    字符串（如 `"7/8"` 表示 0.875、`".../1"` 表示整数），不受浮点范围限制；
+  - `max_calibration_delta`：精确值**可表示为有限浮点数**时返回该数字，
+    **超出浮点范围时返回 `null`**（如两版偏移分别为 `-1e308` 与 `1e308`，
+    温差 2e308 超过 float 上限），**不会输出无穷大，也不会返回 500**。
 
 查询参数：
 
@@ -1199,7 +1206,8 @@ curl -i 'http://localhost:8000/boxes/BOX-CAL/calibration-trajectory?version=1&se
 | `segments[].start_seq`/`end_seq` | 影响段起止事件序号（含端点；缺号断段，不补点）             |
 | `segments[].event_count`      | 段内序号连续且变化方向相同的事件数                            |
 | `segments[].from_status`/`to_status` | 原/新结论：`below`/`normal`/`above`，段内各事件方向一致 |
-| `segments[].max_calibration_delta` | 段内两版校准温差的最大绝对值（℃）                         |
+| `segments[].max_calibration_delta` | 段内两版校准温差的最大绝对值（℃）；可表示为有限浮点数时为数字，超出浮点范围时为 `null`（不输出无穷大） |
+| `segments[].max_calibration_delta_exact` | 同一温差的精确值，约分后“分子/分母”十进制整数字符串（如 `"7/8"`），始终给出 |
 
 启动与端口：先按上文方式一键启动 `docker compose up -d --build`
 （本地不用 Docker 时为 `uvicorn app.main:app --host 0.0.0.0 --port 8000`），
@@ -1255,7 +1263,8 @@ seq=9 因缺 seq=8 断段且方向不同，单独成段，温差恰为 1.0）：
       "event_count": 3,
       "from_status": "normal",
       "to_status": "above",
-      "max_calibration_delta": 0.875
+      "max_calibration_delta": 0.875,
+      "max_calibration_delta_exact": "7/8"
     },
     {
       "start_seq": 9,
@@ -1263,7 +1272,8 @@ seq=9 因缺 seq=8 断段且方向不同，单独成段，温差恰为 1.0）：
       "event_count": 1,
       "from_status": "below",
       "to_status": "normal",
-      "max_calibration_delta": 1.0
+      "max_calibration_delta": 1.0,
+      "max_calibration_delta_exact": "1/1"
     }
   ]
 }
@@ -1282,6 +1292,61 @@ curl -i 'http://localhost:8000/boxes/NO-SUCH-BOX/calibration-impact?from_version
 # 参数非法（seq_from > seq_to、下限大于上限、NaN/Infinity、缺参数等）-> 422
 curl -i 'http://localhost:8000/boxes/BOX-IMP/calibration-impact?from_version=1&to_version=2&seq_from=9&seq_to=1&temp_lower=0&temp_upper=4'
 curl -i 'http://localhost:8000/boxes/BOX-IMP/calibration-impact?from_version=1&to_version=2&seq_from=0&seq_to=1&temp_lower=4&temp_upper=0'
+```
+
+### 大数偏移复现示例（最大温差超出浮点范围）
+
+两版校准的偏移分别取合法有限值 `-1e308` 与 `1e308` 时，段内最大校准温差达
+`2e308`，超出 float 上限（约 1.7976931348623157e308）。此时
+`max_calibration_delta` 返回 **`null`**（不输出无穷大、不返回 500），精确值由
+`max_calibration_delta_exact` 以约分后“分子/分母”给出：
+
+```bash
+# 箱内一条温度为 0 的事件
+curl -X POST http://localhost:8000/events -H 'Content-Type: application/json' \
+  -d '{"box_code":"BOX-BIG","seq":1,"temperature":0,"event_time":"2026-09-26T10:00:00Z"}'
+
+# 两个校准版本：偏移分别恒为 -1e308 与 1e308（均为合法有限值）
+curl -X POST http://localhost:8000/calibrations -H 'Content-Type: application/json' \
+  -d '{"box_code":"BOX-BIG","version":1,"anchors":[
+        {"seq":0,"temp_offset":-1e308},
+        {"seq":10,"temp_offset":-1e308}]}'
+curl -X POST http://localhost:8000/calibrations -H 'Content-Type: application/json' \
+  -d '{"box_code":"BOX-BIG","version":2,"anchors":[
+        {"seq":0,"temp_offset":1e308},
+        {"seq":10,"temp_offset":1e308}]}'
+
+# 阈值 [-1, 1] 审计：v1 校准温度 -1e308 判 below，v2 判 above，温差 2e308 超出浮点范围
+curl 'http://localhost:8000/boxes/BOX-BIG/calibration-impact?from_version=1&to_version=2&seq_from=0&seq_to=10&temp_lower=-1&temp_upper=1'
+```
+
+响应（HTTP `200`；`max_calibration_delta` 为 `null`，精确温差见
+`max_calibration_delta_exact`，分母为 1 表示整数）：
+
+```json
+{
+  "box_code": "BOX-BIG",
+  "from_version": 1,
+  "to_version": 2,
+  "seq_from": 0,
+  "seq_to": 10,
+  "temp_lower": -1.0,
+  "temp_upper": 1.0,
+  "event_count": 1,
+  "changed_event_count": 1,
+  "segment_count": 1,
+  "segments": [
+    {
+      "start_seq": 1,
+      "end_seq": 1,
+      "event_count": 1,
+      "from_status": "below",
+      "to_status": "above",
+      "max_calibration_delta": null,
+      "max_calibration_delta_exact": "200000000000000002195812725888091083480984619354623692673621365806315170809822983074326657956989377798122499339442345031223180567486280176656614018396292092062543329005866054371394979399177118086676768932330002356853795252425890355256182391573414916245567940343568830210583605786415746545949771430860446236672/1"
+    }
+  ]
+}
 ```
 
 ## 群体遥测静默检测（telemetry-outages）
@@ -1679,7 +1744,10 @@ curl -i -X POST http://localhost:8000/retransmission-preview \
   恰等于边界时稳定落入 normal，杜绝浮点边界误判。仅收集两版结论不同的事件，
   按 `seq` 升序单趟扫描合成影响段——后一条序号恰为前一条 +1 且
   `(from_status, to_status)` 相同才延续，否则（缺号、结论未变或方向变化）断段，
-  段内维护两版校准温差绝对值的最大值。审计只读取 `box_events` 与校准锚点，
+  段内维护两版校准温差绝对值的最大值（`Fraction` 精确值）：输出时
+  `max_calibration_delta_exact` 直接给出约分后的“分子/分母”，
+  `max_calibration_delta` 仅在能转为有限 float 时返回数字、溢出时返回 `null`
+  （捕获 `OverflowError`，不产生无穷大或 500）。审计只读取 `box_events` 与校准锚点，
   不写库、不改锚点，现有校准数据与全部分析结果原样保留。
 - **群体静默检测只读**：`/telemetry-outages` 先在路由层对 `box_codes` 去空白、
   按请求顺序去重并拒绝空/超长箱号（422）；服务层一次性校验全部箱号存在

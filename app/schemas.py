@@ -474,11 +474,20 @@ class CalibrationImpactSegment(BaseModel):
             "段内所有事件均为 from_status -> to_status 的同一变化方向"
         ),
     )
-    max_calibration_delta: float = Field(
+    max_calibration_delta: float | None = Field(
         ...,
         description=(
             "段内各事件新版本与原版本校准温度之差的最大绝对值（℃），"
-            "即 max(|新版本校准温度 - 原版本校准温度|)"
+            "即 max(|新版本校准温度 - 原版本校准温度|)；"
+            "精确值可表示为有限浮点数时返回该数字，超出浮点范围时返回 null"
+            "（不输出无穷大），精确值见 max_calibration_delta_exact"
+        ),
+    )
+    max_calibration_delta_exact: str = Field(
+        ...,
+        description=(
+            "段内最大校准温差的精确值，以约分后的“分子/分母”十进制整数字符串表示"
+            "（如 “7/2” 表示 3.5）；不受浮点范围限制，始终给出精确结果"
         ),
     )
 
