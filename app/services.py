@@ -1399,6 +1399,31 @@ def _calibration_status(value: Fraction, lower: Fraction, upper: Fraction) -> st
     return CALIBRATION_STATUS_NORMAL
 
 
+def _exact_fraction_text(value: Fraction) -> str:
+    """把精确有理数格式化为约分后的“分子/分母”。
+
+    Fraction 已约分且分母恒正；温差恒非负但仍统一按有符号分子输出，
+    整数结果形如 "7/1"。结果不受 double 取值范围限制，可精确表达
+    1e308 量级偏移相减得到的温差。
+    """
+    return f"{value.numerator}/{value.denominator}"
+
+
+def _safe_finite_float(value: Fraction) -> float | None:
+    """精确有理数转有限 double；超出浮点有限范围（含过大的整数/分数）返回 None。
+
+    两版合法锚点偏移本身均为有限 double（如 ±1e308），但两者校准温度之差
+    可能超过 double 上界（如 2e308），直接 float() 会抛 OverflowError 造成
+    500；此时精确值仍由 _exact_fraction_text 完整输出，这里返回 null。
+    """
+    try:
+        result = float(value)
+    except OverflowError:
+        return None
+    # 分子/分母均为有限整数，理论上不会出现 NaN/Inf，再兜底确认一次
+    return result if math.isfinite(result) else None
+
+
 def calibration_impact(
     db: Session,
     box_code: str,
@@ -1422,6 +1447,11 @@ def calibration_impact(
     - 仅保留两版结论不同的事件；序号连续（后一条 seq = 前一条 seq + 1）
       且变化方向（from_status, to_status）相同的事件合成一段，
       缺号或遇到结论未变的事件即断段，不为缺号造点
+    - 每段最大校准温差始终以约分后的“分子/分母”精确返回
+      （max_calibration_delta_exact，不受 double 取值范围限制）；
+      max_calibration_delta 在精确值可表示为有限 double 时返回数字，
+      超出范围（如两版偏移 ±1e308 导致温差 2e308）时为 null，
+      绝不输出 Infinity 或抛 OverflowError（500）
     - 全程只读：不写库、不改校准数据、不改写原始事件与任何既有分析结果
     """
     # 1) 两版校准必须都已存在
@@ -1515,7 +1545,8 @@ def calibration_impact(
             event_count=seg["event_count"],
             from_status=seg["from_status"],
             to_status=seg["to_status"],
-            max_calibration_delta=float(seg["max_delta"]),
+            max_calibration_delta=_safe_finite_float(seg["max_delta"]),
+            max_calibration_delta_exact=_exact_fraction_text(seg["max_delta"]),
         )
         for seg in raw_segments
     ]
